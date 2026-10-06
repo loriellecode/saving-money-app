@@ -1,0 +1,9 @@
+{
+  "name": "saving-money-app",
+  "version": "1.0.0",
+  "description": "Stack Saver: lock a savings goal, buy stacks, cash out only when the goal is reached.",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}

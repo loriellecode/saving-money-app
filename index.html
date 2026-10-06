@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stack Saver</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>Stack Saver</h1>
+      <p class="tagline">Set a goal. Buy stacks. Your money stays locked until you hit it.</p>
+      <div class="vault">
+        <span class="vault-label">Held in vault</span>
+        <span id="vault-total" class="vault-total">$0.00</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>New savings goal</h2>
+        <form id="goal-form" class="goal-form">
+          <label>
+            What are you saving for?
+            <input id="goal-name" type="text" placeholder="New bike" maxlength="60" required />
+          </label>
+          <label>
+            Goal amount ($)
+            <input id="goal-amount" type="number" min="1" step="0.01" placeholder="500" required />
+          </label>
+          <button type="submit" class="btn primary">Create &amp; lock goal</button>
+        </form>
+        <p id="goal-error" class="error" role="alert"></p>
+      </section>
+
+      <section>
+        <h2 class="section-title">Your goals</h2>
+        <div id="goals" class="goals"></div>
+        <p id="empty" class="empty">No goals yet. Create one above to get started.</p>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <template id="goal-template">
+      <article class="card goal">
+        <div class="goal-head">
+          <h3 class="goal-name"></h3>
+          <span class="badge"></span>
+        </div>
+        <div class="amounts">
+          <span class="saved"></span>
+          <span class="of"></span>
+        </div>
+        <div class="bar"><div class="bar-fill"></div></div>
+        <p class="remaining"></p>
+
+        <div class="buy">
+          <p class="buy-label">Buy a stack</p>
+          <div class="presets"></div>
+          <form class="custom">
+            <input type="number" min="0.01" step="0.01" placeholder="Custom $" aria-label="Custom stack amount" />
+            <button type="submit" class="btn">Buy</button>
+          </form>
+        </div>
+
+        <button type="button" class="btn cashout"></button>
+
+        <details class="history">
+          <summary></summary>
+          <ul></ul>
+        </details>
+
+        <button type="button" class="link delete">Delete goal</button>
+      </article>
+    </template>
+
+    <script src="savings.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
