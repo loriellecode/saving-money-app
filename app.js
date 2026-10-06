@@ -18,6 +18,7 @@
   let ready = false; // auth state known and goals loaded
   let recovering = false; // signed in through a password reset link
   let busy = false; // a save is in flight
+  let appleEnabled = false; // set once Supabase reports the Apple provider is on
   let authSeq = 0; // ignores goal loads made stale by a newer auth event
   let goals = [];
 
@@ -121,6 +122,10 @@
 
   function icon(name) {
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+  }
+
+  function appleLogo() {
+    return '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 1.43c0 1.14-.49 2.27-1.18 3.08-.74.9-1.99 1.57-2.99 1.57-.12 0-.23-.02-.3-.03-.01-.06-.04-.22-.04-.39 0-1.15.57-2.27 1.21-2.98.8-.94 2.14-1.64 3.25-1.68.03.13.05.28.05.43zm4.56 15.71c-.03.07-.46 1.58-1.52 3.12-.94 1.34-1.94 2.71-3.43 2.71-1.52 0-1.9-.88-3.63-.88-1.7 0-2.3.91-3.67.91-1.38 0-2.33-1.26-3.43-2.8-1.29-1.82-2.32-4.63-2.32-7.28 0-4.28 2.8-6.55 5.55-6.55 1.45 0 2.68.95 3.6.95.87 0 2.22-1.01 3.9-1.01.61 0 2.89.06 4.37 2.19-.13.09-2.38 1.37-2.38 4.19 0 3.26 2.85 4.42 2.96 4.45z"/></svg>';
   }
 
   // App mark: a stack of bars pinned by a lock bar.
@@ -292,6 +297,7 @@
       <form class="auth-form" id="auth-form" data-mode="${mode}" novalidate>
         <h1>${c.title}</h1>
         <p class="auth-sub">${c.sub}</p>
+        ${mode === "signin" || mode === "signup" ? '<div id="oauth-slot"></div>' : ""}
         ${emailField}
         ${passwordField}
         ${mode === "signin" ? '<a class="auth-link" href="#/forgot">Forgot password?</a>' : ""}
@@ -593,6 +599,7 @@
     if (name === "welcome") return mount("welcome", welcomeView(), true);
     if (name === "signin" || name === "signup" || name === "forgot" || name === "reset") {
       mount(name, authView(name), true);
+      fillOAuth();
       const first = screen.querySelector("input");
       if (first && matchMedia("(hover: hover)").matches) first.focus();
       return;
@@ -661,6 +668,39 @@
     }
     ready = true;
     renderRoute();
+  }
+
+  // Ask Supabase which sign-in providers are switched on, so the Apple button
+  // only shows once Apple is configured in the dashboard.
+  async function loadProviders() {
+    try {
+      const res = await fetch(`${cfg.supabaseUrl}/auth/v1/settings`, { headers: { apikey: cfg.supabaseKey } });
+      const settings = await res.json();
+      appleEnabled = Boolean(settings.external && settings.external.apple);
+    } catch {
+      appleEnabled = false;
+    }
+    fillOAuth();
+  }
+
+  function fillOAuth() {
+    const slot = screen.querySelector("#oauth-slot");
+    if (!slot) return;
+    slot.innerHTML = appleEnabled
+      ? `<button type="button" class="btn-apple" data-action="apple">${appleLogo()}Continue with Apple</button>
+         <div class="or"><span>or use email</span></div>`
+      : "";
+  }
+
+  async function appleSignIn(btn) {
+    btn.disabled = true;
+    // On success the browser leaves for Apple and comes back signed in (?code=... is exchanged by supabase-js).
+    const { error } = await db.auth.signInWithOAuth({ provider: "apple", options: { redirectTo: redirectUrl() } });
+    if (error) {
+      btn.disabled = false;
+      const errEl = screen.querySelector("#auth-error");
+      if (errEl) errEl.textContent = authErrorText(error);
+    }
   }
 
   function redirectUrl() {
@@ -904,6 +944,7 @@
     else if (action === "cashout") cashOutFlow(el.dataset.id, el);
     else if (action === "delete") deleteFlow(el.dataset.id);
     else if (action === "account") accountFlow();
+    else if (action === "apple") appleSignIn(el);
     else if (action === "buy-any") {
       if (openGoals().length) location.hash = "#/buy";
       else {
@@ -964,6 +1005,14 @@
   renderRoute();
 
   if (db) {
+    // A cancelled or failed Apple sign-in comes back as ?error=...&error_description=...
+    const params = new URLSearchParams(location.search);
+    const oauthError = params.get("error_description") || params.get("error");
+    if (oauthError) {
+      history.replaceState(null, "", location.pathname + location.hash);
+      toast(esc(oauthError));
+    }
+    loadProviders();
     // Supabase advises against awaiting its own calls inside this callback, so defer.
     db.auth.onAuthStateChange((event, s) => setTimeout(() => handleAuth(event, s), 0));
   }

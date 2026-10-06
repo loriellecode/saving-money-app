@@ -29,7 +29,15 @@ Rules enforced by the app:
 
 It's a phone-style web app. On a desktop it appears in a phone frame, and on a phone it fills the screen.
 
-## Run it
+## Live site
+
+The app is published with GitHub Pages at **https://loriellecode.github.io/saving-money-app/**.
+`.github/workflows/pages.yml` runs the tests and redeploys on every push to the default branch.
+
+One-time setup: in the GitHub repo, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+Then run the **Deploy to GitHub Pages** workflow from the **Actions** tab, or push a commit.
+
+## Run it locally
 
 ```sh
 npm start
@@ -44,6 +52,7 @@ to `http://localhost:3000`, so the app needs to be served from there.
 ## Accounts and data (Supabase)
 
 Sign-in uses Supabase Auth with email and password, including sign-up with email confirmation, password reset, and sign-out.
+**Continue with Apple** shows up automatically once Apple is switched on in Supabase (see below).
 Each account's goals and stacks are stored in the `stack-saver` Supabase project. The URL and publishable key are in `config.js`.
 The publishable key is safe to ship in the page, because the database decides what each user can do.
 
@@ -54,15 +63,43 @@ The rules are enforced by the database, not just the app (see `supabase/migratio
 - Stacks can't be edited or deleted after they're bought.
 - A goal can be deleted only when it's empty or already cashed out.
 
-### Supabase settings to check
+### Supabase settings
 
-In the Supabase dashboard, under **Authentication**:
+In the Supabase dashboard, open the **stack-saver** project, then go to **Authentication**:
 
-- **URL Configuration**: the Site URL defaults to `http://localhost:3000`, which matches `npm start`.
-  When you put the app online, set the Site URL to that address and add it under **Redirect URLs**.
-- **Emails**: Supabase's built-in email service is for testing only. It sends a few emails per hour, and only to
+- **URL Configuration**
+  - **Site URL:** `https://loriellecode.github.io/saving-money-app/`
+  - **Redirect URLs:** add `https://loriellecode.github.io/saving-money-app/**` and `http://localhost:3000/**`
+- **Emails:** Supabase's built-in email service is for testing only. It sends a few emails per hour, and only to
   members of your Supabase organization. Before real people sign up, set up custom SMTP under **Emails → SMTP Settings**.
-  For quick testing, you can instead turn off **Confirm email** under **Sign In / Providers → Email**.
+
+### Sign in with Apple
+
+This needs a paid [Apple Developer Program](https://developer.apple.com/programs/) membership ($99/year).
+Supabase's guide: https://supabase.com/docs/guides/auth/social-login/auth-apple
+
+1. **App ID:** In [Identifiers](https://developer.apple.com/account/resources/identifiers/list/bundleId), create an App ID,
+   for example `com.yourname.stacksaver`. Under Capabilities, tick **Sign in with Apple**.
+2. **Services ID:** In [Identifiers](https://developer.apple.com/account/resources/identifiers/list/serviceId), create a Services ID,
+   for example `com.yourname.stacksaver.web`. This becomes your *Client ID*. Turn on **Sign in with Apple**, click **Configure**, then:
+   - **Primary App ID:** the App ID from step 1
+   - **Domains:** `uckfstmceffkascffclh.supabase.co`
+   - **Return URLs:** `https://uckfstmceffkascffclh.supabase.co/auth/v1/callback`
+3. **Key:** In [Keys](https://developer.apple.com/account/resources/authkeys/list), create a key with **Sign in with Apple** enabled.
+   Download the `AuthKey_XXXXXXXXXX.p8` file. Apple only lets you download it once, so keep it somewhere safe and never commit it.
+   The `.gitignore` already blocks `*.p8`.
+4. **Client secret:** Generate it on your computer. Your Team ID is shown in the top right of the Apple Developer site.
+   ```sh
+   node tools/apple-client-secret.js --team-id TEAMID --key-id KEYID \
+     --client-id com.yourname.stacksaver.web --key ~/Downloads/AuthKey_KEYID.p8
+   ```
+5. **Supabase:** Go to **Authentication → Sign In / Providers → Apple**. Turn it on, paste the Services ID into
+   **Client IDs**, paste the generated secret into **Secret Key (for OAuth)**, and save.
+
+That's it. The **Continue with Apple** button appears on the sign-in and sign-up screens.
+
+**Every 6 months**, Apple's client secret expires and Apple sign-in stops working.
+Re-run step 4 and paste the new secret before then. The script prints the expiry date.
 
 ## Tests
 
