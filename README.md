@@ -17,9 +17,21 @@ Rules enforced by the app:
   A goal can be deleted only when it's empty or already cashed out.
 - Each goal can be cashed out once. After that, it's closed and can't take more stacks.
 
+## Screens
+
+- **Welcome**: shown the first time, before you have any goals.
+- **Home**: total held in the vault, quick actions (buy stack, new goal, cash out, activity),
+  your goals with progress, and a feed of recent stacks and cash-outs.
+- **Goal**: progress toward the goal, lock status, stack history, and the cash-out button.
+- **Buy a stack**: pick a goal, tap a quick stack ($10/$20/$50/$100 or "finish goal") or type any
+  amount on the keypad.
+- **New goal**: name it, enter the amount on the keypad, create it locked.
+
+It's a phone-style web app. On a desktop it appears in a phone frame, and on a phone it fills the screen.
+
 ## Run it
 
-No install or build step. Open `index.html` in a browser.
+No install or build step. Open `index.html` in a browser. On a computer, you can also type amounts with your keyboard.
 
 Data is saved in your browser's `localStorage`, on this device only.
 
