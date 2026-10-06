@@ -4,6 +4,7 @@
   "description": "Stack Saver: lock a savings goal, buy stacks, cash out only when the goal is reached.",
   "private": true,
   "scripts": {
+    "start": "node server.js",
     "test": "node --test"
   }
 }

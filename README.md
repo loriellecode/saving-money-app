@@ -19,7 +19,7 @@ Rules enforced by the app:
 
 ## Screens
 
-- **Welcome**: shown the first time, before you have any goals.
+- **Welcome, sign in, create account, reset password**: shown when you're signed out.
 - **Home**: total held in the vault, quick actions (buy stack, new goal, cash out, activity),
   your goals with progress, and a feed of recent stacks and cash-outs.
 - **Goal**: progress toward the goal, lock status, stack history, and the cash-out button.
@@ -31,9 +31,38 @@ It's a phone-style web app. On a desktop it appears in a phone frame, and on a p
 
 ## Run it
 
-No install or build step. Open `index.html` in a browser. On a computer, you can also type amounts with your keyboard.
+```sh
+npm start
+```
 
-Data is saved in your browser's `localStorage`, on this device only.
+Then open http://localhost:3000. There are no dependencies to install; the Supabase client loads from a CDN.
+On a computer, you can also type amounts with your keyboard.
+
+Use `npm start`, not a double-click on `index.html`. Supabase's confirmation and password-reset emails link back
+to `http://localhost:3000`, so the app needs to be served from there.
+
+## Accounts and data (Supabase)
+
+Sign-in uses Supabase Auth with email and password, including sign-up with email confirmation, password reset, and sign-out.
+Each account's goals and stacks are stored in the `stack-saver` Supabase project. The URL and publishable key are in `config.js`.
+The publishable key is safe to ship in the page, because the database decides what each user can do.
+
+The rules are enforced by the database, not just the app (see `supabase/migrations/`):
+
+- Row level security: each user can see and add only their own goals and stacks. Signed-out visitors can see nothing.
+- Goals can't be edited directly. Cashing out goes through the `cash_out()` function, which refuses until the stacks add up to the goal.
+- Stacks can't be edited or deleted after they're bought.
+- A goal can be deleted only when it's empty or already cashed out.
+
+### Supabase settings to check
+
+In the Supabase dashboard, under **Authentication**:
+
+- **URL Configuration**: the Site URL defaults to `http://localhost:3000`, which matches `npm start`.
+  When you put the app online, set the Site URL to that address and add it under **Redirect URLs**.
+- **Emails**: Supabase's built-in email service is for testing only. It sends a few emails per hour, and only to
+  members of your Supabase organization. Before real people sign up, set up custom SMTP under **Emails → SMTP Settings**.
+  For quick testing, you can instead turn off **Confirm email** under **Sign In / Providers → Email**.
 
 ## Tests
 
@@ -42,6 +71,7 @@ npm test
 ```
 
 The goal and lock rules are in `savings.js`, which has no DOM code, and are tested in `savings.test.js`.
+The same rules are enforced again by the database.
 
 ## Note on real money
 

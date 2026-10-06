@@ -1,14 +1,25 @@
-// UI for Stack Saver. Goal rules live in savings.js.
+// UI for Stack Saver. Goal rules live in savings.js; accounts and data live in Supabase.
 (function () {
   const S = window.Savings;
-  const STORAGE_KEY = "stack-saver.goals.v1";
+  const cfg = window.STACK_SAVER_CONFIG || {};
 
   const app = document.getElementById("app");
   const screen = document.getElementById("screen");
   const toastEl = document.getElementById("toast");
   const modal = document.getElementById("modal");
 
-  let goals = load();
+  // PKCE keeps auth callbacks in the query string (?code=...) so they don't
+  // collide with the hash router.
+  const db = window.supabase
+    ? window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey, { auth: { flowType: "pkce" } })
+    : null;
+
+  let session = null;
+  let ready = false; // auth state known and goals loaded
+  let recovering = false; // signed in through a password reset link
+  let busy = false; // a save is in flight
+  let authSeq = 0; // ignores goal loads made stale by a newer auth event
+  let goals = [];
 
   // In-progress keypad entries for the buy and new-goal screens.
   const draft = {
@@ -19,32 +30,36 @@
     newAmount: "",
   };
 
-  // ---------- storage ----------
-
-  function load() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(goals));
-    } catch {
-      // Storage unavailable (private mode etc.) — app still works for this session.
-    }
-  }
-
   const find = (id) => goals.find((g) => g.id === id);
   const openGoals = () => goals.filter((g) => !S.isCashedOut(g));
 
   function replaceGoal(next) {
     goals = goals.map((g) => (g.id === next.id ? next : g));
-    save();
+  }
+
+  // ---------- data (Supabase) ----------
+
+  const GOAL_COLUMNS = "id, name, target_cents, created_at, cashed_out_at, stacks (id, amount_cents, created_at)";
+
+  function stackFromRow(s) {
+    return { id: s.id, amountCents: Number(s.amount_cents), at: Date.parse(s.created_at) };
+  }
+
+  function goalFromRow(r) {
+    return {
+      id: r.id,
+      name: r.name,
+      targetCents: Number(r.target_cents),
+      createdAt: Date.parse(r.created_at),
+      cashedOutAt: r.cashed_out_at ? Date.parse(r.cashed_out_at) : null,
+      stacks: (r.stacks || []).map(stackFromRow).sort((a, b) => a.at - b.at),
+    };
+  }
+
+  async function loadGoals() {
+    const { data, error } = await db.from("goals").select(GOAL_COLUMNS).order("created_at", { ascending: false });
+    if (error) throw error;
+    return data.map(goalFromRow);
   }
 
   // ---------- formatting ----------
@@ -73,6 +88,19 @@
   const timeStr = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   const shortDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
+  function errorText(err) {
+    if (!navigator.onLine) return "You're offline. Check your connection and try again.";
+    return (err && err.message) || "Something went wrong. Try again.";
+  }
+
+  function authErrorText(err) {
+    const msg = (err && err.message) || "";
+    if (/invalid login credentials/i.test(msg)) return "Wrong email or password.";
+    if (/email not confirmed/i.test(msg)) return "Confirm your email first. Check your inbox for the link.";
+    if (err && err.status === 429) return "Too many attempts. Wait a minute and try again.";
+    return errorText(err);
+  }
+
   // ---------- icons ----------
 
   const ICONS = {
@@ -88,6 +116,7 @@
     list: '<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     backspace: '<path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z"/><path d="m12 9 6 6M18 9l-6 6"/>',
+    mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
   };
 
   function icon(name) {
@@ -186,7 +215,22 @@
     return `$${shown}<span class="caret"></span>`;
   }
 
-  // ---------- screens ----------
+  // ---------- signed-out screens ----------
+
+  function splashView() {
+    return `<div class="splash">${logo()}</div>`;
+  }
+
+  function setupErrorView() {
+    return `<div class="auth">
+      <div class="auth-mark">${logo()}</div>
+      <div class="auth-form">
+        <h1>Can't reach Stack Saver</h1>
+        <p class="auth-sub">The sign-in service didn't load. Check your internet connection, then reload the page.</p>
+        <button type="button" class="btn-white" onclick="location.reload()">Reload</button>
+      </div>
+    </div>`;
+  }
 
   function welcomeView() {
     return `<div class="welcome">
@@ -195,11 +239,83 @@
       <div class="welcome-copy">
         <h1>Save it.<br />Lock it.<br />Stack it up.</h1>
         <p>Set a goal and buy stacks toward it. Your money stays locked in the vault until every dollar of the goal is saved.</p>
-        <a class="btn-white" href="#/new">Create your first goal</a>
-        <a class="btn-text" href="#/home">${goals.length ? "Go to my goals" : "Look around first"}</a>
+        <a class="btn-white" href="#/signup">Create an account</a>
+        <a class="btn-text" href="#/signin">I already have an account</a>
       </div>
     </div>`;
   }
+
+  const AUTH_COPY = {
+    signin: {
+      title: "Welcome back",
+      sub: "Sign in to see your goals and your vault.",
+      button: "Sign in",
+      switchHref: "#/signup",
+      switchLabel: "New here? Create an account",
+    },
+    signup: {
+      title: "Create your account",
+      sub: "Your goals and stacks are saved to your account, so they're there on any device.",
+      button: "Create account",
+      switchHref: "#/signin",
+      switchLabel: "Already have an account? Sign in",
+    },
+    forgot: {
+      title: "Reset your password",
+      sub: "Enter your email and we'll send you a link to choose a new password.",
+      button: "Send reset link",
+      switchHref: "#/signin",
+      switchLabel: "Back to sign in",
+    },
+    reset: {
+      title: "Choose a new password",
+      sub: "Pick a new password for your account.",
+      button: "Save new password",
+      switchHref: "",
+      switchLabel: "",
+    },
+  };
+
+  function authView(mode) {
+    const c = AUTH_COPY[mode];
+    const emailField = mode === "reset" ? "" : `<label class="auth-field">
+        <span>Email</span>
+        <input type="email" name="email" autocomplete="email" inputmode="email" placeholder="you@example.com" required />
+      </label>`;
+    const passwordField = mode === "forgot" ? "" : `<label class="auth-field">
+        <span>${mode === "reset" ? "New password" : "Password"}</span>
+        <input type="password" name="password" autocomplete="${mode === "signin" ? "current-password" : "new-password"}" placeholder="${mode === "signin" ? "Your password" : "At least 6 characters"}" minlength="6" required />
+      </label>`;
+    return `<div class="auth">
+      <header class="auth-top">${mode === "reset" ? "" : `<a class="icon-btn glass" href="#/welcome" aria-label="Back">${icon("back")}</a>`}</header>
+      <div class="auth-mark">${logo()}</div>
+      <form class="auth-form" id="auth-form" data-mode="${mode}" novalidate>
+        <h1>${c.title}</h1>
+        <p class="auth-sub">${c.sub}</p>
+        ${emailField}
+        ${passwordField}
+        ${mode === "signin" ? '<a class="auth-link" href="#/forgot">Forgot password?</a>' : ""}
+        <p class="auth-error" id="auth-error" role="alert"></p>
+        <button type="submit" class="btn-white">${c.button}</button>
+        ${c.switchHref ? `<a class="btn-text" href="${c.switchHref}">${c.switchLabel}</a>` : ""}
+      </form>
+    </div>`;
+  }
+
+  function sentView(email, reset) {
+    return `<div class="auth">
+      <header class="auth-top"><a class="icon-btn glass" href="#/signin" aria-label="Back">${icon("back")}</a></header>
+      <div class="auth-mark mail">${icon("mail")}</div>
+      <div class="auth-form">
+        <h1>Check your email</h1>
+        <p class="auth-sub">We sent ${reset ? "a password reset link" : "a confirmation link"} to <b>${esc(email)}</b>.
+          ${reset ? "Open it to choose a new password." : "Open it to activate your account, then sign in."}</p>
+        <a class="btn-white" href="#/signin">Back to sign in</a>
+      </div>
+    </div>`;
+  }
+
+  // ---------- signed-in screens ----------
 
   function homeView() {
     const open = openGoals();
@@ -207,6 +323,8 @@
     const ready = open.filter(S.canCashOut).length;
     const sorted = [...open, ...goals.filter(S.isCashedOut)];
     const activity = activityItems(goals).slice(0, 20);
+    const email = (session && session.user.email) || "";
+    const initial = esc((Array.from(email)[0] || "?").toUpperCase());
 
     const coins = open.length
       ? `<div class="coins">${open
@@ -227,7 +345,7 @@
     return `<div class="hero">
       <header class="topbar">
         <div class="brand">${logo()}<span>Stack Saver</span></div>
-        <a class="icon-btn glass" href="#/new" aria-label="New goal">${icon("plus")}</a>
+        <button type="button" class="icon-btn glass account-btn" data-action="account" aria-label="Account: ${esc(email)}">${initial}</button>
       </header>
       ${coins}
       <p class="hero-label">Held in vault</p>
@@ -421,8 +539,8 @@
     hint.classList.toggle("good", good);
 
     const btn = screen.querySelector("#buy-submit");
-    btn.disabled = !goal || cents <= 0;
-    btn.textContent = cents > 0 ? `Buy ${money(cents)} stack` : "Enter an amount";
+    btn.disabled = busy || !goal || cents <= 0;
+    btn.textContent = busy ? "Saving…" : cents > 0 ? `Buy ${money(cents)} stack` : "Enter an amount";
   }
 
   function updateNew() {
@@ -431,35 +549,62 @@
     amountEl.innerHTML = amountHtml(draft.newAmount);
     amountEl.classList.toggle("empty", cents === 0);
     const btn = screen.querySelector("#new-submit");
-    btn.disabled = cents <= 0 || !draft.newName.trim();
-    btn.textContent = cents > 0 ? `Create & lock ${money(cents)} goal` : "Create & lock goal";
+    btn.disabled = busy || cents <= 0 || !draft.newName.trim();
+    btn.textContent = busy ? "Saving…" : cents > 0 ? `Create & lock ${money(cents)} goal` : "Create & lock goal";
   }
 
   // ---------- routing ----------
+
+  const SIGNED_OUT_ROUTES = ["welcome", "signin", "signup", "forgot"];
 
   function parseRoute() {
     const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
     return { name: parts[0] || "", id: parts[1] ? decodeURIComponent(parts[1]) : null };
   }
 
-  function mount(kind, html) {
+  function mount(kind, html, gradient = false) {
     app.dataset.screen = kind;
-    screen.className = `screen screen-${kind}`;
+    screen.className = `screen screen-${kind}${gradient ? " gradient" : ""}`;
     screen.innerHTML = html;
     screen.scrollTop = 0;
   }
 
+  // Swap the URL to the screen actually shown, without another hashchange.
+  function redirect(name) {
+    history.replaceState(null, "", `#/${name}`);
+    return name;
+  }
+
   function renderRoute() {
     closeModal(false);
-    const r = parseRoute();
-    const name = r.name || (goals.length ? "home" : "welcome");
+    if (!db) return mount("error", setupErrorView(), true);
+    if (!ready) return mount("loading", splashView(), true);
 
-    if (name === "welcome") return mount("welcome", welcomeView());
+    const r = parseRoute();
+    let name = r.name;
+    if (!session) {
+      if (!SIGNED_OUT_ROUTES.includes(name)) name = redirect("welcome");
+    } else if (recovering) {
+      name = redirect("reset");
+    } else if (!name || SIGNED_OUT_ROUTES.includes(name) || name === "reset") {
+      name = redirect("home");
+    }
+
+    if (name === "welcome") return mount("welcome", welcomeView(), true);
+    if (name === "signin" || name === "signup" || name === "forgot" || name === "reset") {
+      mount(name, authView(name), true);
+      const first = screen.querySelector("input");
+      if (first && matchMedia("(hover: hover)").matches) first.focus();
+      return;
+    }
     if (name === "home") return mount("home", homeView());
 
     if (name === "goal") {
       const g = find(r.id);
-      if (!g) return location.replace("#/home");
+      if (!g) {
+        redirect("home");
+        return mount("home", homeView());
+      }
       return mount("goal", goalView(g));
     }
 
@@ -484,7 +629,105 @@
       return;
     }
 
-    location.replace("#/home");
+    redirect("home");
+    mount("home", homeView());
+  }
+
+  // ---------- auth ----------
+
+  async function handleAuth(event, nextSession) {
+    const prevUser = session && session.user.id;
+    session = nextSession;
+    const userId = session && session.user.id;
+
+    if (event === "PASSWORD_RECOVERY") recovering = true;
+    if (event === "SIGNED_OUT") recovering = false;
+    // Token refreshes and repeat SIGNED_IN events (e.g. on tab focus) need no reload.
+    if (ready && userId === prevUser && event !== "PASSWORD_RECOVERY") return;
+
+    const seq = ++authSeq;
+    ready = false;
+    renderRoute();
+    goals = [];
+    if (userId) {
+      let loaded = [];
+      try {
+        loaded = await loadGoals();
+      } catch (err) {
+        toast(`Couldn't load your goals. ${esc(errorText(err))}`);
+      }
+      if (seq !== authSeq) return;
+      goals = loaded;
+    }
+    ready = true;
+    renderRoute();
+  }
+
+  function redirectUrl() {
+    return location.protocol.startsWith("http") ? location.origin + location.pathname : undefined;
+  }
+
+  async function submitAuth(form) {
+    const mode = form.dataset.mode;
+    const email = form.email ? form.email.value.trim() : "";
+    const password = form.password ? form.password.value : "";
+    const errEl = form.querySelector("#auth-error");
+    const btn = form.querySelector('button[type="submit"]');
+    errEl.textContent = "";
+
+    if (form.email && !/^\S+@\S+\.\S+$/.test(email)) {
+      errEl.textContent = "Enter a valid email address.";
+      return;
+    }
+    if (form.password && password.length < 6) {
+      errEl.textContent = "Password must be at least 6 characters.";
+      return;
+    }
+
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "One moment…";
+    try {
+      if (mode === "signin") {
+        const { error } = await db.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        // onAuthStateChange loads the goals and shows the home screen.
+      } else if (mode === "signup") {
+        const { data, error } = await db.auth.signUp({ email, password, options: { emailRedirectTo: redirectUrl() } });
+        if (error) throw error;
+        if (!data.session) mount("sent", sentView(email, false), true);
+      } else if (mode === "forgot") {
+        const { error } = await db.auth.resetPasswordForEmail(email, { redirectTo: redirectUrl() });
+        if (error) throw error;
+        mount("sent", sentView(email, true), true);
+      } else if (mode === "reset") {
+        const { error } = await db.auth.updateUser({ password });
+        if (error) throw error;
+        recovering = false;
+        redirect("home");
+        renderRoute();
+        toast(`${icon("check")} Password updated.`);
+      }
+    } catch (err) {
+      errEl.textContent = authErrorText(err);
+    } finally {
+      if (btn.isConnected) {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
+    }
+  }
+
+  async function accountFlow() {
+    const email = (session && session.user.email) || "your account";
+    const yes = await ask({
+      title: email,
+      body: "Sign out of Stack Saver on this device? Your goals stay saved to your account.",
+      ok: "Sign out",
+    });
+    if (!yes) return;
+    const { error } = await db.auth.signOut();
+    if (error) toast(esc(errorText(error)));
   }
 
   // ---------- actions ----------
@@ -494,7 +737,7 @@
     toastEl.innerHTML = html;
     toastEl.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toastEl.classList.remove("show"), 3000);
+    toastTimer = setTimeout(() => toastEl.classList.remove("show"), 3200);
   }
 
   let modalResolve = null;
@@ -518,7 +761,21 @@
     if (e.target.id === "modal-ok") closeModal(true);
   });
 
-  async function cashOutFlow(id) {
+  // Runs one save at a time so double taps can't double-buy.
+  async function save(fn, onFail) {
+    if (busy) return;
+    busy = true;
+    try {
+      await fn();
+      busy = false;
+    } catch (err) {
+      busy = false;
+      toast(esc(errorText(err)));
+      if (onFail) onFail();
+    }
+  }
+
+  async function cashOutFlow(id, tileEl) {
     const g = find(id);
     if (!g || S.isCashedOut(g)) return;
     if (S.isLocked(g)) {
@@ -532,9 +789,18 @@
       ok: `Cash out ${amt}`,
     });
     if (!yes) return;
-    replaceGoal(S.cashOut(g));
-    renderRoute();
-    toast(`🎉 ${amt} cashed out. Nice saving!`);
+    tileEl.disabled = true;
+    await save(
+      async () => {
+        // The database re-checks the lock; the client check above is just for a friendly message.
+        const { data, error } = await db.rpc("cash_out", { p_goal_id: id });
+        if (error) throw error;
+        replaceGoal({ ...g, cashedOutAt: Date.parse(data.cashed_out_at) });
+        renderRoute();
+        toast(`🎉 ${amt} cashed out. Nice saving!`);
+      },
+      () => (tileEl.disabled = false)
+    );
   }
 
   async function deleteFlow(id) {
@@ -546,42 +812,68 @@
     }
     const yes = await ask({ title: `Delete "${g.name}"?`, body: "This removes the goal and its history.", ok: "Delete goal" });
     if (!yes) return;
-    goals = goals.filter((x) => x.id !== id);
-    save();
-    location.hash = "#/home";
+    await save(async () => {
+      const { data, error } = await db.from("goals").delete().eq("id", id).select("id");
+      if (error) throw error;
+      if (!data.length) throw new Error("This goal is holding money, so it can't be deleted yet.");
+      goals = goals.filter((x) => x.id !== id);
+      location.hash = "#/home";
+    });
   }
 
   function buySubmit() {
     const goal = find(draft.buyGoalId);
     const cents = keyedCents(draft.buyAmount);
-    if (!goal || cents <= 0) return;
-    try {
-      const next = S.buyStack(goal, cents);
-      replaceGoal(next);
-      location.hash = `#/goal/${goal.id}`;
-      if (S.isLocked(goal) && !S.isLocked(next)) {
-        toast(`${icon("unlock")} Goal reached! "${esc(goal.name)}" is unlocked.`);
-      } else {
-        toast(`${icon("stack")} ${money(cents)} stack added to the vault.`);
-      }
-    } catch (err) {
-      toast(esc(err.message));
-    }
+    if (!goal || cents <= 0 || busy) return;
+    const wasLocked = S.isLocked(goal);
+    const pending = save(
+      async () => {
+        S.buyStack(goal, cents); // same validation the database applies
+        const { data, error } = await db
+          .from("stacks")
+          .insert({ goal_id: goal.id, amount_cents: cents })
+          .select("id, amount_cents, created_at")
+          .single();
+        if (error) throw error;
+        const next = { ...goal, stacks: [...goal.stacks, stackFromRow(data)] };
+        replaceGoal(next);
+        location.hash = `#/goal/${goal.id}`;
+        if (wasLocked && !S.isLocked(next)) {
+          toast(`${icon("unlock")} Goal reached! "${esc(goal.name)}" is unlocked.`);
+        } else {
+          toast(`${icon("stack")} ${money(cents)} stack added to the vault.`);
+        }
+      },
+      () => app.dataset.screen === "buy" && updateBuy(false)
+    );
+    updateBuy(false); // show "Saving…"
+    return pending;
   }
 
   function newSubmit() {
-    try {
-      const goal = S.createGoal(draft.newName, keyedCents(draft.newAmount));
-      goals = [goal, ...goals];
-      save();
-      location.hash = `#/goal/${goal.id}`;
-      toast(`${icon("lock")} "${esc(goal.name)}" created and locked.`);
-    } catch (err) {
-      toast(esc(err.message));
-    }
+    if (busy) return;
+    const pending = save(
+      async () => {
+        const local = S.createGoal(draft.newName, keyedCents(draft.newAmount)); // validates
+        const { data, error } = await db
+          .from("goals")
+          .insert({ name: local.name, target_cents: local.targetCents })
+          .select(GOAL_COLUMNS)
+          .single();
+        if (error) throw error;
+        const goal = goalFromRow(data);
+        goals = [goal, ...goals];
+        location.hash = `#/goal/${goal.id}`;
+        toast(`${icon("lock")} "${esc(goal.name)}" created and locked.`);
+      },
+      () => app.dataset.screen === "new" && updateNew()
+    );
+    updateNew();
+    return pending;
   }
 
   function handleKey(key) {
+    if (busy) return;
     if (app.dataset.screen === "buy" && draft.buyGoalId) {
       draft.buyAmount = pressKey(draft.buyAmount, key);
       updateBuy(false);
@@ -599,16 +891,19 @@
     if (action === "nav") location.hash = el.dataset.href;
     else if (action === "key") handleKey(el.dataset.key);
     else if (action === "pick-goal") {
+      if (busy) return;
       draft.buyGoalId = el.dataset.id;
       updateBuy(true);
     } else if (action === "quick") {
+      if (busy) return;
       const c = Number(el.dataset.cents);
       draft.buyAmount = c % 100 === 0 ? String(c / 100) : (c / 100).toFixed(2);
       updateBuy(false);
     } else if (action === "buy-submit") buySubmit();
     else if (action === "new-submit") newSubmit();
-    else if (action === "cashout") cashOutFlow(el.dataset.id);
+    else if (action === "cashout") cashOutFlow(el.dataset.id, el);
     else if (action === "delete") deleteFlow(el.dataset.id);
+    else if (action === "account") accountFlow();
     else if (action === "buy-any") {
       if (openGoals().length) location.hash = "#/buy";
       else {
@@ -622,6 +917,12 @@
     } else if (action === "scroll") {
       document.getElementById(el.dataset.target).scrollIntoView({ behavior: "smooth" });
     }
+  });
+
+  screen.addEventListener("submit", (e) => {
+    if (e.target.id !== "auth-form") return;
+    e.preventDefault();
+    submitAuth(e.target);
   });
 
   screen.addEventListener("input", (e) => {
@@ -661,4 +962,9 @@
 
   window.addEventListener("hashchange", renderRoute);
   renderRoute();
+
+  if (db) {
+    // Supabase advises against awaiting its own calls inside this callback, so defer.
+    db.auth.onAuthStateChange((event, s) => setTimeout(() => handleAuth(event, s), 0));
+  }
 })();
